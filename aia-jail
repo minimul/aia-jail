@@ -11,7 +11,7 @@ PASSTHROUGH_ARGS=()
 # ============================================
 # Custom apt packages to install (space-separated)
 # Modify this line to add your own packages
-CUSTOM_APT_PACKAGES="jq dnsutils openssh-client ripgrep fzf"
+CUSTOM_APT_PACKAGES="jq ripgrep fzf"
 # ============================================
 
 # Parse command line arguments

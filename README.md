@@ -64,7 +64,12 @@ Set at least one provider key before running:
 | `GOOGLE_API_KEY` | Google (Gemini) |
 | `OPEN_ROUTER_API_KEY` | OpenRouter |
 
-If `OPEN_ROUTER_API_KEY` is not set but `~/.local/share/opencode/auth.json` exists, the key is read from it automatically — so credentials are shared seamlessly with [OpenCode](https://opencode.ai).
+
+##### Special Hack
+AIA doesn't store auth credentials and only reads from ENV vars (see table above).
+
+For example, personally, I have OpenRouter creds stored in the opencode auth.json file. 
+If `OPEN_ROUTER_API_KEY` is not set but `~/.local/share/opencode/auth.json` exists, the key is read from it automatically — so credentials are shared seamlessly with [OpenCode](https://opencode.ai) and with each new instance of `aia-jail`.
 
 ### Adding packages
 
