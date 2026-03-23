@@ -2,10 +2,14 @@
 set -eo pipefail
 
 IMAGE_NAME="aia-standalone"
+DIND_IMAGE="docker:27-dind"
+DIND_CONTAINER_NAME="aia-jail-dind"
+DIND_PORT=2375
 SCRIPT_PATH="$(readlink -f "$0")"
 FORCE_REBUILD=false
 SHELL_MODE=false
 PASSTHROUGH_ARGS=()
+ENV_VARS=()
 : "${USER:=$(id -un)}"
 
 # ============================================
@@ -25,21 +29,25 @@ while [[ $# -gt 0 ]]; do
             SHELL_MODE=true
             shift
             ;;
+        -e|--env)
+            if [ -z "${2:-}" ]; then
+                echo "Error: $1 requires a VALUE (e.g. -e KEY=VALUE)" >&2
+                exit 1
+            fi
+            ENV_VARS+=("$2")
+            shift 2
+            ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS] [-- ARGS...]"
             echo ""
             echo "Options:"
+            echo "  -e,  --env KEY=VAL   Pass an environment variable to the container (repeatable)"
             echo "  -r,  --rebuild       Force rebuild of the Docker image"
             echo "  -s,  --shell         Start a bash shell instead of aia"
             echo "  -h,  --help          Show this help message"
             echo ""
             echo "Arguments after -- are passed through to aia."
             echo ""
-            echo "Environment variables for AI providers (passed to container):"
-            echo "  ANTHROPIC_API_KEY    Anthropic API key"
-            echo "  OPENAI_API_KEY       OpenAI API key"
-            echo "  GOOGLE_API_KEY       Google API key"
-            echo "  OPEN_ROUTER_API_KEY  OpenRouter API key"
             exit 0
             ;;
         --)
@@ -83,19 +91,12 @@ else
 fi
 
 if [ "$NEEDS_BUILD" = true ]; then
-    DOCKER_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null) || true
-    if [ -z "$DOCKER_GID" ]; then
-        echo "Failed to determine docker group ID from /var/run/docker.sock"
-        exit 1
-    fi
     docker build \
-      --build-arg DOCKER_GID="$DOCKER_GID" \
       --build-arg CUSTOM_APT_PACKAGES="$CUSTOM_APT_PACKAGES" \
       --label "script.hash=$SCRIPT_HASH" \
       -t "$IMAGE_NAME" - <<'DOCKERFILE'
 FROM ruby:3.3-bookworm
 
-ARG DOCKER_GID
 ARG CUSTOM_APT_PACKAGES
 
 # Install system dependencies, Docker CLI, and custom packages
@@ -124,23 +125,59 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
 # Install aia and debug_me gems globally
 RUN gem install aia debug_me
 
-# Create non-root user for running aia
-RUN useradd -m -s /bin/bash aia
-
-# Add user to docker group for docker access (handle GID collision)
-RUN if getent group ${DOCKER_GID} >/dev/null 2>&1; then \
-        EXISTING_GROUP=$(getent group ${DOCKER_GID} | cut -d: -f1); \
-        usermod -aG "$EXISTING_GROUP" aia; \
-    else \
-        groupadd -g ${DOCKER_GID} docker && usermod -aG docker aia; \
-    fi
-
-# Switch to non-root user
-USER aia
-
 WORKDIR /workspace
 CMD ["aia"]
 DOCKERFILE
+fi
+
+# ---------------------------------------------------------------------------
+# Docker-in-Docker (DinD): the aia-jail container gets its own completely
+# isolated Docker daemon.  It cannot see host containers, cannot mount the
+# host filesystem, and cannot access the host Docker socket.  The DinD
+# sidecar runs as a separate container and the aia-jail container connects
+# to it over TCP via DOCKER_HOST.
+# ---------------------------------------------------------------------------
+ensure_dind() {
+    # If the DinD container is already running, just return its IP
+    if docker inspect --format '{{.State.Running}}' "$DIND_CONTAINER_NAME" 2>/dev/null | grep -q true; then
+        DIND_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$DIND_CONTAINER_NAME")
+        return
+    fi
+
+    # Remove stale stopped container if present
+    docker rm -f "$DIND_CONTAINER_NAME" &>/dev/null || true
+
+    echo "Starting Docker-in-Docker daemon ($DIND_CONTAINER_NAME)..."
+    docker run -d --name "$DIND_CONTAINER_NAME" \
+        --privileged \
+        --restart unless-stopped \
+        -e DOCKER_TLS_CERTDIR="" \
+        "$DIND_IMAGE" \
+        dockerd --host=tcp://0.0.0.0:${DIND_PORT} --tls=false >/dev/null
+
+    # Wait for the DinD daemon to be ready (up to 30s)
+    echo -n "Waiting for DinD daemon..."
+    DIND_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$DIND_CONTAINER_NAME")
+    for i in $(seq 1 60); do
+        if curl -sf "http://${DIND_IP}:${DIND_PORT}/_ping" &>/dev/null; then
+            echo " ready."
+            return
+        fi
+        echo -n "."
+        sleep 0.5
+    done
+
+    echo " FAILED"
+    echo "ERROR: DinD daemon did not become ready in time" >&2
+    docker logs "$DIND_CONTAINER_NAME" 2>&1 | tail -10 >&2
+    exit 1
+}
+
+ensure_dind
+
+if [ -z "$DIND_IP" ]; then
+    echo "ERROR: Could not determine DinD IP" >&2
+    exit 1
 fi
 
 # Pull OPEN_ROUTER_API_KEY from shared OpenCode auth.json if not already set
@@ -159,33 +196,44 @@ if [[ -n "${OPEN_ROUTER_API_KEY:-}" && -z "${OPENROUTER_API_KEY:-}" ]]; then
     export OPENROUTER_API_KEY
 fi
 
-# Build the docker run command
-# Mount the actual host path to the same path inside the container
-# This is required for docker-compose to work correctly with volume mounts
+# Build the docker run command.
+# - Runs as the host user's UID:GID so that all mounted host directories are
+#   writable without any ownership mismatch.
+# - The host Docker socket is NEVER mounted.  DOCKER_HOST points to the
+#   isolated DinD daemon over TCP.
+# - HOME is set explicitly because there is no /etc/passwd entry for an
+#   arbitrary UID; aia uses $HOME to locate config dirs.
 HOST_PWD="$(pwd)"
 DOCKER_ARGS=(
   -it --rm
   --label "hostdir=$HOST_PWD"
+  -u "$(id -u):$(id -g)"
   -v "$HOST_PWD:$HOST_PWD"
-  -v "$aia_prompts:/home/aia/.prompts"
-  -v "$aia_config:/home/aia/.config/aia"
-  -v "$opencode_data:/home/aia/.local/share/opencode"
-  -v "/var/run/docker.sock:/var/run/docker.sock"
+  -v "$aia_prompts:$aia_prompts"
+  -v "$aia_config:$aia_config"
+  -v "$opencode_data:$opencode_data"
   -w "$HOST_PWD"
+  -e HOME="$HOME"
+  -e DOCKER_HOST="tcp://${DIND_IP}:${DIND_PORT}"
   -e ANTHROPIC_API_KEY
   -e OPENAI_API_KEY
   -e GOOGLE_API_KEY
   -e OPEN_ROUTER_API_KEY
   -e OPENROUTER_API_KEY
-  -e AIA_PROMPTS_DIR=/home/aia/.prompts
+  -e AIA_PROMPTS_DIR="$aia_prompts"
 )
+
+# Append user-supplied environment variables
+for env_var in "${ENV_VARS[@]}"; do
+    DOCKER_ARGS+=(-e "$env_var")
+done
 
 if [ "$SHELL_MODE" = true ]; then
     EXISTING=$(docker ps -q --filter "label=hostdir=$HOST_PWD" --filter "ancestor=$IMAGE_NAME" | head -1)
     if [ -n "$EXISTING" ]; then
         exec docker exec -it "$EXISTING" bash
     else
-        exec docker run "${DOCKER_ARGS[@]}" -u root "$IMAGE_NAME" bash
+        exec docker run "${DOCKER_ARGS[@]}" "$IMAGE_NAME" bash
     fi
 elif [ ${#PASSTHROUGH_ARGS[@]} -gt 0 ]; then
     exec docker run "${DOCKER_ARGS[@]}" "$IMAGE_NAME" aia "${PASSTHROUGH_ARGS[@]}"

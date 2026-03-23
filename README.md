@@ -101,9 +101,10 @@ The Docker image ships with these CLI tools alongside `aia`:
 
 - `ripgrep` — fast file content search
 - `fzf` — fuzzy finder
+- `jq` — JSON processor
 - `gh` — GitHub CLI
 - `docker` CLI and `docker compose` plugin
-- `openssh-client`, `dnsutils`, `jq`, `curl`, `build-essential`
+- `curl`, `build-essential`
 
 ## Testing Docker access
 
