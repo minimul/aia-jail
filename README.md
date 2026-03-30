@@ -1,10 +1,10 @@
 # aia-jail
 
-A single-file Bash launcher that runs the [`aia`](https://github.com/MadBomber/aia) AI assistant CLI inside a Docker sandbox. Ruby and all gem dependencies stay off your host machine, and `aia` only has access to the directory from which `aia-jail` is launched — plus any Docker containers defined within that same directory.
+A single-file Bash launcher that runs the [`aia`](https://github.com/MadBomber/aia) AI assistant CLI inside a Docker sandbox. Ruby and all gem dependencies stay off your host machine, and `aia` only has access to the directory from which `aia-jail` is launched plus any Docker containers defined within that same directory.
 
 ## How it works
 
-On first run, `aia-jail` builds a Docker image from an embedded Dockerfile (Ruby 3.3 on Debian Bookworm with `aia` and common CLI tools pre-installed). Subsequent runs reuse the image. If you edit the script — for example to add packages — the image is automatically rebuilt via `md5sum` change detection.
+On first run, `aia-jail` builds a Docker image from an embedded Dockerfile (Ruby 3.3 on Debian Bookworm with `aia` and common CLI tools pre-installed). Subsequent runs reuse the image. If you edit the script — for example to add packages the image is automatically rebuilt via `md5sum` change detection.
 
 ## Prerequisites
 
