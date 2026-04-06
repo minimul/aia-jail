@@ -4,7 +4,30 @@ A single-file Bash launcher that runs the [`aia`](https://github.com/MadBomber/a
 
 ## How it works
 
-On first run, `aia-jail` builds a Docker image from an embedded Dockerfile (Ruby 3.3 on Debian Bookworm with `aia` and common CLI tools pre-installed). Subsequent runs reuse the image. If you edit the script — for example to add packages the image is automatically rebuilt via `md5sum` change detection.
+On first run, `aia-jail` builds a Docker image from an embedded Dockerfile (Ruby 3.3 on Debian Bookworm with `aia` and common CLI tools pre-installed). Subsequent runs reuse the image. If you edit the script — for example to add packages — the image is automatically rebuilt via `md5sum` change detection.
+
+### Docker-in-Docker (DinD) isolation
+
+`aia-jail` spins up a Docker-in-Docker sidecar so that any `docker` or `docker compose` commands run inside the `aia` container talk to an **isolated Docker daemon**, not the host's. The sidecar:
+
+- cannot see host containers
+- cannot mount the host filesystem (beyond the current working directory)
+- cannot access the host Docker socket
+
+#### Per-directory isolation
+
+The DinD sidecar container and its private bridge network are named with a 12-character hash of the current working directory:
+
+```
+aia-jail-dind-<hash>
+aia-jail-net-<hash>
+```
+
+This means you can run `aia-jail` simultaneously from different directories without any name collisions.
+
+#### Automatic cleanup
+
+When `aia-jail` exits it automatically stops and removes both the DinD sidecar container and the private network via an `EXIT` trap. No leftover containers or networks accumulate on your host.
 
 ## Prerequisites
 
@@ -49,7 +72,7 @@ aia-jail --shell
 aia-jail --rebuild
 ```
 
-If `--shell` is used while a container from the same working directory is already running, the script `docker exec`s into it rather than starting a new one.
+If `--shell` is used while a container from the same working directory is already running, the script `docker exec`s into it rather than starting a new one (and the DinD cleanup trap is suppressed so the sidecar keeps running).
 
 ## Configuration
 
@@ -87,13 +110,14 @@ The following host paths are mounted into every container:
 
 | Host | Container | Purpose |
 |---|---|---|
-| `$(pwd)` | same path | Current working directory (path-mirrored for Docker-in-Docker compatibility) |
+| `$(pwd)` | same path | Current working directory (path-mirrored for DinD compatibility) |
 | `~/.prompts` | `/home/aia/.prompts` | aia prompt files |
 | `~/.config/aia` | `/home/aia/.config/aia` | aia configuration |
 | `~/.local/share/opencode` | `/home/aia/.local/share/opencode` | OpenCode data and auth |
-| `/var/run/docker.sock` | `/var/run/docker.sock` | Docker socket (enables Docker-in-Docker) |
 
-The current directory is mounted at its exact host path so that any nested `docker` or `docker compose` commands launched from inside `aia` resolve volume paths correctly on the host.
+> **Note:** The Docker socket (`/var/run/docker.sock`) is **not** mounted. All Docker operations go through the isolated DinD sidecar over TCP on the private bridge network.
+
+The current directory is mounted at its exact host path so that any nested `docker` or `docker compose` commands launched from inside `aia` resolve volume paths correctly on the host. The same path is also mounted into the DinD sidecar for the same reason.
 
 ## Included tools
 
@@ -108,40 +132,42 @@ The Docker image ships with these CLI tools alongside `aia`:
 
 ## Testing Docker access
 
-A `docker-compose.yml` is included to verify that `aia-jail` can reach Docker containers defined in the same directory.
+A `docker-compose.yml` and `docker-compose.test.yml` are included to verify that `aia-jail` can reach Docker containers and services defined in the same directory, using the isolated DinD daemon.
 
-From the `aia-jail` directory, start the test service in the background:
+The compose file defines two services:
 
-```bash
-docker compose up -d
-```
+| Service | Purpose |
+|---|---|
+| `test-web` | A minimal Alpine HTTP server listening on port 8080 |
+| `docker-access-test` | A test runner that checks volume mounts and compose service networking |
 
-Then open a shell inside the `aia-jail` container from the same directory:
+Open a shell inside the `aia-jail` container from the project directory:
 
 ```bash
 aia-jail --shell
 ```
 
-From inside the container, confirm the service is visible and its log output is accessible:
+From inside the container, run the test suite:
 
 ```bash
-# List running containers — the 'hello' service should appear
-docker compose ps
-
-# Confirm the success message printed by the container
-docker compose logs hello
-# => hello-1  | aia-jail docker access: OK
-
-# Exec a command directly into the running service
-docker compose exec hello sh -c "echo hello from inside alpine"
-# => hello from inside alpine
+docker compose run --rm docker-access-test
 ```
 
-When done, tear the service down:
+Expected output:
 
-```bash
-docker compose down
 ```
+=== DinD Docker Compose Test ===
+
+--- Test 1: Volume mount (project files visible) ---
+[PASS] docker-compose.test.yml found via volume mount
+
+--- Test 2: Compose service networking ---
+[PASS] Got response from test-web: OK
+```
+
+The `docker-compose.test.yml` file is a sentinel used by the test runner to confirm that the host working directory is correctly mounted inside the DinD-managed container.
+
+When you exit the shell, the DinD sidecar and private network are automatically cleaned up.
 
 ## License
 
