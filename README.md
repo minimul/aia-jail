@@ -94,6 +94,29 @@ AIA doesn't store auth credentials and only reads from ENV vars (see table above
 For example, personally, I have OpenRouter creds stored in the opencode auth.json file. 
 If `OPEN_ROUTER_API_KEY` is not set but `~/.local/share/opencode/auth.json` exists, the key is read from it automatically — so credentials are shared seamlessly with [OpenCode](https://opencode.ai) and with each new instance of `aia-jail`.
 
+The launcher passes both `OPEN_ROUTER_API_KEY` (used by `aia`) and `OPENROUTER_API_KEY` (used by RubyLLM) into the container automatically.
+
+### Using OpenRouter
+
+Set your OpenRouter key on the host and select an OpenRouter model by its model ID:
+
+```bash
+export OPEN_ROUTER_API_KEY="sk-or-v1-..."
+aia-jail -- --chat --model "anthropic/claude-3.5-sonnet"
+```
+
+You can also pass the key for a single invocation:
+
+```bash
+OPEN_ROUTER_API_KEY="sk-or-v1-..." aia-jail -- --chat --model "meta-llama/llama-3.3-70b-instruct"
+```
+
+To inspect models known to AIA/RubyLLM:
+
+```bash
+aia-jail -- --available-models
+```
+
 ### Adding packages
 
 To install extra packages into the image, edit the `CUSTOM_APT_PACKAGES` variable near the top of the script:

@@ -136,8 +136,13 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Install aia and debug_me gems globally
-RUN gem install aia debug_me
+# Use Vim-style editing in aia's interactive Reline prompt.
+# This is baked into the image so it works for the arbitrary host UID too.
+RUN printf '%s\n' 'set editing-mode vi' > /etc/inputrc
+ENV INPUTRC=/etc/inputrc
+
+# Install aia and its shared tool dependencies globally
+RUN gem install aia debug_me shared_tools
 
 WORKDIR /workspace
 CMD ["aia"]
